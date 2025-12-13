@@ -16,7 +16,7 @@
     "prettier": "^3.7.4"
   },
   "lint-staged": {
-    "coding/**/*.js": [
+    "**/*.js": [
       "eslint --fix"
     ]
   },
