@@ -1,0 +1,401 @@
+/* @flow */
+
+import config from '../config'
+import Watcher from '../observer/watcher'
+import Dep, { pushTarget, popTarget } from '../observer/dep'
+import { isUpdatingChildComponent } from './lifecycle'
+
+import {
+  set,
+  del,
+  observe,
+  defineReactive,
+  toggleObserving
+} from '../observer/index'
+
+import {
+  warn,
+  bind,
+  noop,
+  hasOwn,
+  hyphenate,
+  isReserved,
+  handleError,
+  nativeWatch,
+  validateProp,
+  isPlainObject,
+  isServerRendering,
+  isReservedAttribute,
+  invokeWithErrorHandling
+} from '../util/index'
+
+const sharedPropertyDefinition = {
+  enumerable: true,
+  configurable: true,
+  get: noop,
+  set: noop
+}
+
+export function proxy (target: Object, sourceKey: string, key: string) {
+  sharedPropertyDefinition.get = function proxyGetter () {
+    return this[sourceKey][key]
+  }
+  sharedPropertyDefinition.set = function proxySetter (val) {
+    this[sourceKey][key] = val
+  }
+  Object.defineProperty(target, key, sharedPropertyDefinition)
+}
+
+export function initState (vm: Component) {
+  vm._watchers = []
+  const opts = vm.$options
+  if (opts.props) initProps(vm, opts.props)
+  if (opts.methods) initMethods(vm, opts.methods)
+  if (opts.data) {
+    initData(vm)
+  } else {
+    observe(vm._data = {}, true /* asRootData */)
+  }
+  if (opts.computed) initComputed(vm, opts.computed)
+  if (opts.watch && opts.watch !== nativeWatch) {
+    initWatch(vm, opts.watch)
+  }
+}
+
+function initProps (vm: Component, propsOptions: Object) {
+  const propsData = vm.$options.propsData || {}
+  const props = vm._props = {}
+  // cache prop keys so that future props updates can iterate using Array
+  // instead of dynamic object key enumeration.
+  const keys = vm.$options._propKeys = []
+  const isRoot = !vm.$parent
+  // root instance props should be converted
+  if (!isRoot) {
+    toggleObserving(false)
+  }
+  for (const key in propsOptions) {
+    keys.push(key)
+    const value = validateProp(key, propsOptions, propsData, vm)
+    /* istanbul ignore else */
+    if (process.env.NODE_ENV !== 'production') {
+      const hyphenatedKey = hyphenate(key)
+      if (isReservedAttribute(hyphenatedKey) ||
+          config.isReservedAttr(hyphenatedKey)) {
+        warn(
+          `"${hyphenatedKey}" is a reserved attribute and cannot be used as component prop.`,
+          vm
+        )
+      }
+      defineReactive(props, key, value, () => {
+        if (!isRoot && !isUpdatingChildComponent) {
+          warn(
+            `Avoid mutating a prop directly since the value will be ` +
+            `overwritten whenever the parent component re-renders. ` +
+            `Instead, use a data or computed property based on the prop's ` +
+            `value. Prop being mutated: "${key}"`,
+            vm
+          )
+        }
+      })
+    } else {
+      defineReactive(props, key, value)
+    }
+    // static props are already proxied on the component's prototype
+    // during Vue.extend(). We only need to proxy props defined at
+    // instantiation here.
+    if (!(key in vm)) {
+      proxy(vm, `_props`, key)
+    }
+  }
+  toggleObserving(true)
+}
+
+function initData (vm: Component) {
+  let data = vm.$options.data
+  data = vm._data = typeof data === 'function'
+    ? getData(data, vm)
+    : data || {}
+  if (!isPlainObject(data)) {
+    data = {}
+    process.env.NODE_ENV !== 'production' && warn(
+      'data functions should return an object:\n' +
+      'https://vuejs.org/v2/guide/components.html#data-Must-Be-a-Function',
+      vm
+    )
+  }
+  // proxy data on instance
+  const keys = Object.keys(data)
+  const props = vm.$options.props
+  const methods = vm.$options.methods
+  let i = keys.length
+  while (i--) {
+    const key = keys[i]
+    if (process.env.NODE_ENV !== 'production') {
+      if (methods && hasOwn(methods, key)) {
+        warn(
+          `Method "${key}" has already been defined as a data property.`,
+          vm
+        )
+      }
+    }
+    if (props && hasOwn(props, key)) {
+      process.env.NODE_ENV !== 'production' && warn(
+        `The data property "${key}" is already declared as a prop. ` +
+        `Use prop default value instead.`,
+        vm
+      )
+    } else if (!isReserved(key)) {
+      proxy(vm, `_data`, key)
+    }
+  }
+  // observe data
+  observe(data, true /* asRootData */)
+}
+
+export function getData (data: Function, vm: Component): any {
+  // #7573 disable dep collection when invoking data getters
+  pushTarget()
+  try {
+    return data.call(vm, vm)
+  } catch (e) {
+    handleError(e, vm, `data()`)
+    return {}
+  } finally {
+    popTarget()
+  }
+}
+
+// 用于创建 computed watcher 的默认配置：lazy: true
+// 表示计算属性默认不会立即执行 getter
+const computedWatcherOptions = { lazy: true }
+
+// 初始化所有计算属性
+function initComputed (vm: Component, computed: Object) {
+  // 初始化存放所有 computed 对应 watcher 的容器（不需要原型链）
+  // 每个 computed key -> 一个 lazy watcher
+  // $flow-disable-line
+  const watchers = vm._computedWatchers = Object.create(null)
+
+  // 判断是否为服务端渲染环境（SSR 下不需要缓存等行为）
+  // computed properties are just getters during SSR
+  const isSSR = isServerRendering()
+
+  // 遍历所有 computed 项
+  for (const key in computed) {
+    const userDef = computed[key]
+
+    // 用户定义的computed可以是函数，也可以是 { get, set }
+    const getter = typeof userDef === 'function' ? userDef : userDef.get
+    if (process.env.NODE_ENV !== 'production' && getter == null) {
+      warn(
+        `Getter is missing for computed property "${key}".`,
+        vm
+      )
+    }
+
+    // 非 SSR 时，需要为每个 computed 创建内部 watcher
+    if (!isSSR) {
+      // create internal watcher for the computed property.
+      watchers[key] = new Watcher(
+        vm,                   // 组件实例
+        getter || noop,       // getter 函数
+        noop,                 // 不需要回调（computed 没有回调）
+        { lazy: true }        // lazy: true，使 watcher 不立即求值
+      )
+    }
+
+
+    /**
+     * 组件原型上定义的 computed（通过 Vue.extend）已经提前定义了 getter/setter
+     * 这里只处理实例化时新定义的 computed
+     */
+    // component-defined computed properties are already defined on the
+    // component prototype. We only need to define computed properties defined
+    // at instantiation here.
+    if (!(key in vm)) {
+      defineComputed(vm, key, userDef)
+    } else if (process.env.NODE_ENV !== 'production') {
+      if (key in vm.$data) {
+        warn(`The computed property "${key}" is already defined in data.`, vm)
+      } else if (vm.$options.props && key in vm.$options.props) {
+        warn(`The computed property "${key}" is already defined as a prop.`, vm)
+      } else if (vm.$options.methods && key in vm.$options.methods) {
+        warn(`The computed property "${key}" is already defined as a method.`, vm)
+      }
+    }
+  }
+}
+
+// 在vue实例上定义单个计算属性
+export function defineComputed (
+  target: any,
+  key: string,
+  userDef: Object | Function
+) {
+  // SSR 环境下不需要缓存
+  const shouldCache = !isServerRendering()
+
+  if (typeof userDef === 'function') {
+    // 只有 getter 的简单写法
+    sharedPropertyDefinition.get = shouldCache
+      ? createComputedGetter(key) // 有缓存 -> 使用 computed getter 逻辑
+      : createGetterInvoker(userDef) // 无缓存 -> 每次直接执行 getter
+    sharedPropertyDefinition.set = noop
+  } else {
+    // 有 get / set 的对象写法
+    sharedPropertyDefinition.get = userDef.get
+      ? shouldCache && userDef.cache !== false
+        ? createComputedGetter(key) // 有缓存 -> 使用 computed getter 逻辑
+        : createGetterInvoker(userDef.get) // 无缓存 -> 每次直接执行 getter
+      : noop
+    sharedPropertyDefinition.set = userDef.set || noop
+  }
+
+  // 开发环境警告：没有 setter 却被赋值
+  if (process.env.NODE_ENV !== 'production' &&
+      sharedPropertyDefinition.set === noop) {
+    sharedPropertyDefinition.set = function () {
+      warn(
+        `Computed property "${key}" was assigned to but it has no setter.`,
+        this
+      )
+    }
+  }
+
+  // 在 vm 上定义这个 computed 属性
+  Object.defineProperty(target, key, sharedPropertyDefinition)
+}
+
+function createComputedGetter (key) {
+  return function computedGetter () {
+    // 取到当前 computed 的 watcher
+    const watcher = this._computedWatchers && this._computedWatchers[key]
+    if (watcher) {
+      // lazy watcher：只有 dirty 才重新求值
+      if (watcher.dirty) {
+        watcher.evaluate()
+      }
+      // 让当前正在执行订阅的watcher，订阅本watcher的所有订阅项
+      // 我的任何订阅内容发生变化，你也要收到通知
+      // computed watcher是没有回调函数的，靠的是链接依赖
+      if (Dep.target) {
+        watcher.depend()
+      }
+      return watcher.value // 返回缓存值
+    }
+  }
+}
+
+function createGetterInvoker(fn) {
+  return function computedGetter () {
+    // SSR 或 cache:false 时使用
+    return fn.call(this, this) // 每次都执行 getter，不使用缓存
+  }
+}
+
+function initMethods (vm: Component, methods: Object) {
+  const props = vm.$options.props
+  for (const key in methods) {
+    if (process.env.NODE_ENV !== 'production') {
+      if (typeof methods[key] !== 'function') {
+        warn(
+          `Method "${key}" has type "${typeof methods[key]}" in the component definition. ` +
+          `Did you reference the function correctly?`,
+          vm
+        )
+      }
+      if (props && hasOwn(props, key)) {
+        warn(
+          `Method "${key}" has already been defined as a prop.`,
+          vm
+        )
+      }
+      if ((key in vm) && isReserved(key)) {
+        warn(
+          `Method "${key}" conflicts with an existing Vue instance method. ` +
+          `Avoid defining component methods that start with _ or $.`
+        )
+      }
+    }
+    vm[key] = typeof methods[key] !== 'function' ? noop : bind(methods[key], vm)
+  }
+}
+
+function initWatch (vm: Component, watch: Object) {
+  for (const key in watch) {
+    const handler = watch[key]
+    if (Array.isArray(handler)) {
+      for (let i = 0; i < handler.length; i++) {
+        createWatcher(vm, key, handler[i])
+      }
+    } else {
+      createWatcher(vm, key, handler)
+    }
+  }
+}
+
+function createWatcher (
+  vm: Component,
+  expOrFn: string | Function,
+  handler: any,
+  options?: Object
+) {
+  if (isPlainObject(handler)) {
+    options = handler
+    handler = handler.handler
+  }
+  if (typeof handler === 'string') {
+    handler = vm[handler]
+  }
+  return vm.$watch(expOrFn, handler, options)
+}
+
+export function stateMixin (Vue: Class<Component>) {
+  // flow somehow has problems with directly declared definition object
+  // when using Object.defineProperty, so we have to procedurally build up
+  // the object here.
+  const dataDef = {}
+  dataDef.get = function () { return this._data }
+  const propsDef = {}
+  propsDef.get = function () { return this._props }
+  if (process.env.NODE_ENV !== 'production') {
+    dataDef.set = function () {
+      warn(
+        'Avoid replacing instance root $data. ' +
+        'Use nested data properties instead.',
+        this
+      )
+    }
+    propsDef.set = function () {
+      warn(`$props is readonly.`, this)
+    }
+  }
+  Object.defineProperty(Vue.prototype, '$data', dataDef)
+  Object.defineProperty(Vue.prototype, '$props', propsDef)
+
+  Vue.prototype.$set = set
+  Vue.prototype.$delete = del
+
+  Vue.prototype.$watch = function (
+    expOrFn: string | Function,
+    cb: any,
+    options?: Object
+  ): Function {
+    const vm: Component = this
+    if (isPlainObject(cb)) {
+      return createWatcher(vm, expOrFn, cb, options)
+    }
+    options = options || {}
+    options.user = true
+    const watcher = new Watcher(vm, expOrFn, cb, options)
+    if (options.immediate) {
+      const info = `callback for immediate watcher "${watcher.expression}"`
+      pushTarget()
+      invokeWithErrorHandling(cb, vm, [watcher.value], vm, info)
+      popTarget()
+    }
+    return function unwatchFn () {
+      watcher.teardown()
+    }
+  }
+}
