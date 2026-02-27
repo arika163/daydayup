@@ -1,6 +1,17 @@
 function mountComponent(vnode, container, anchor) {
+  // 检查是否是函数式组件
+  const isFunctional = typeof vnode.type === 'function'
+
   // 通过 vnode 获取组件的选项对象，即 vnode.type
-  const componentOptions = vnode.type
+  let componentOptions = vnode.type
+  if (isFunctional) {
+    // 如果是函数式组件，则将 vnode.type 作为渲染函数，将 vnode.type.props 作为 props 选项定义即可
+    componentOptions = {
+      render: vnode.type,
+      props: vnode.type.props
+    }
+  }
+
   // 获取组件的渲染函数 render
   const { 
     render, 

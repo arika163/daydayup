@@ -70,7 +70,11 @@ function createRenderer(options) {
         // 如果旧vnode存在，则只需要更新Fragment的children即可
         patchChildren(n1, n2, container)
       }
-    } else if (typeof type === 'object') {
+    } else if (
+      // type 是对象 ---> 有状态组件
+      // type 是函数 ---> 函数式组件
+      typeof type === 'object' || typeof type === 'function'
+    ) {
       // vnode.type 的值是选项对象，作为组件来处理
       if (!n1) {
         // 挂载组件
