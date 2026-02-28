@@ -47,7 +47,23 @@ function mountComponent(vnode, container, anchor) {
     // 将插槽添加到组件实例上
     slots,
     // 在组件实例中添加 mounted 数组，用来存储通过 onMounted 函数注册的生命周期钩子函数
-    mounted: []
+    mounted: [],
+    // 只有 KeepAlive 组件的实例下会有 keepAliveCtx
+    keepAliveCtx: null
+  }
+
+  // 检查当前要挂载的组件是否是 KeepAlive 组件
+  const isKeepAlive = vnode.type.__isKeepAlive
+  if(isKeepAlive) {
+    // 在 KeepAlive 组件实例上添加 keepAliveCtx 对象
+    instance.keepAliveCtx = {
+      // move 函数用来移动一段 vnode
+      move(vnode, container, anchor) {
+        // 本质上是将组件渲染的内容移动到指定容器中，即隐藏容器中
+        insert(vnode.component.subTree.el, container, anchor)
+      },
+      createElement
+    }
   }
 
   // 定义 emit 函数，它接收两个参数

@@ -1,4 +1,83 @@
-// 快速diff算法实现
+/**
+ * 对比两组带 key 的子节点（keyed children），并以最小 DOM 操作完成更新。
+ * 这是 Vue3 “快速 Diff 算法”的核心实现
+ *
+ * 核心思想：
+ * 1. 先处理「前置相同节点」和「后置相同节点」
+ * 2. 再处理中间“乱序区间”
+ * 3. 利用「最长递增子序列（LIS）」减少 DOM 移动次数
+ *
+ * ----------------------------------------
+ * 执行流程
+ * ----------------------------------------
+ *
+ * 一共分 5 个阶段：
+ *
+ * 【阶段1】前置节点对比
+ *   - 从头开始，依次对比 key
+ *   - 相同则 patch
+ *   - 遇到不同立即停止
+ *
+ * 【阶段2】后置节点对比
+ *   - 从尾开始，依次对比 key
+ *   - 相同则 patch
+ *   - 遇到不同立即停止
+ *
+ * 【阶段3】理想情况处理
+ *
+ *  3.1 新节点多（需要挂载）
+ *   条件：j > oldEnd && j <= newEnd
+ *   → 说明旧节点用完了，新节点还有剩
+ *
+ *  3.2 旧节点多（需要卸载）
+ *   条件：j > newEnd && j <= oldEnd
+ *   → 说明新节点用完了，旧节点还有剩
+ *
+ * 【阶段4】非理想情况（核心 diff）
+ *  新旧节点均有剩余，处理中间“乱序区域”
+ *   - 遍历旧节点：
+ *     - 存在对应新节点 → patch + 更新source数组
+ *     - 不存在对应新节点 → unmount
+ *     - source 数组
+ *       - source[i] = 新节点在 oldChildren 中的位置
+ *       - source[i] = -1 表示该节点是新增节点
+ *     - 检查是否需要移动节点
+ *
+ * 【阶段5】移动 + 挂载（关键优化点）
+ *   - 若需要移动：
+ *     1. 计算 source 的 LIS（最长递增子序列）
+ *     2. 倒序遍历：
+ *        - 不在 LIS → 需要移动
+ *        - = -1 → 新节点，需要挂载
+ *        - 在 LIS → 保持不动
+ *
+ * ----------------------------------------
+ * 为什么要用 LIS？
+ * ----------------------------------------
+ *
+ * LIS 表示：
+ * “已经是正确顺序的节点子序列”
+ *
+ * 这些节点：
+ *   - 不需要移动
+ *   - 只移动其他节点
+ *
+ * → 从而实现：
+ *   “最少 DOM 移动次数”
+ *
+ * ----------------------------------------
+ *
+ * @param {VNode} n1 - 旧 vnode（old vnode）
+ *   - children 是带 key 的数组
+ *
+ * @param {VNode} n2 - 新 vnode（new vnode）
+ *   - children 是带 key 的数组
+ *
+ * @param {HTMLElement} container - 父容器 DOM
+ *   - 所有子节点最终挂载/移动的容器
+ *
+ * @returns {void}
+ */
 function patchKeyedChildren(n1, n2, container) {
   const newChildren = n2.children
   const oldChildren = n1.children
@@ -111,7 +190,7 @@ function patchKeyedChildren(n1, n2, container) {
     if (moved) {
       // 如果 moved 为真，则需要进行 DOM 移动操作
 
-      // 计算最长递增子序列
+      // 计算最长递增子序列，算法实现略
       const seq = lis(source)
 
       // s 指向最长增长子序列的最后一个元素
@@ -121,8 +200,8 @@ function patchKeyedChildren(n1, n2, container) {
       // for 循环使得 i 递减
       for (i; i >= 0; i--) {
         if (source[i] === -1) {
-          // 说明索引为i的节点是全新的节点，应该将其挂载
-          // 该节点在新children中的真实位置索引
+          // 说明索引为 i 的节点是全新的节点，应该将其挂载
+          // 该节点在新 children 中的真实位置索引
           const pos = i + newStart
           const newVNode = newChildren[pos]
           // 该节点的下一个节点的位置索引
