@@ -78,6 +78,10 @@ function patch(n1, n2, container, anchor) {
     // 将逻辑转移至 Teleport 组件中，目的是为了避免渲染器的代码继续膨胀
     // 以及更好的摇树优化支持
 
+    // 注意：
+    // 不管是挂载还是更新，都会直接执行 process，
+    // 逻辑由 process 继续代为处理。
+
     type.process(n1, n2, container, anchor, {
       patch,
       patchChildren,
