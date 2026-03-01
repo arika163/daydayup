@@ -52,7 +52,9 @@ function mountComponent(vnode, container, anchor) {
     keepAliveCtx: null
   }
 
+  // KeepAlive组件的渲染器支持
   // 检查当前要挂载的组件是否是 KeepAlive 组件
+  // 如果是的话，注入keepAliveCtx
   const isKeepAlive = vnode.type.__isKeepAlive
   if(isKeepAlive) {
     // 在 KeepAlive 组件实例上添加 keepAliveCtx 对象
@@ -188,6 +190,11 @@ function mountComponent(vnode, container, anchor) {
     }
     // 更新组件实例的子树
     instance.subTree = subTree
+
+    // 这里特别注意：
+    // vnode.component.subtree 指向组件实例的子树
+    // vnode.children 指向的是节点在当前组件中编写的子内容（文本、插槽等）
+    // 整棵 vnode 树，本质上还是通过 subtree 串联起来的
   }, {
     // 指定该副作用函数的调度器为 queueJob 即可
     // 缓冲、去重、异步执行
