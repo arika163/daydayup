@@ -117,14 +117,18 @@ function patch(n1, n2, container, anchor) {
  *
  * 核心职责：
  * 1. 处理 Fragment（递归卸载子节点）
- * 2. 处理组件（移除subTree）
+ * 2. 处理组件（递归调用自身，移除subTree）
  * 3. 处理keepalive（转移至缓存）
- * 4. 处理普通 DOM 元素（直接移除）
+ * 4. 处理普通 DOM 元素（直接移除或借助transition.leave移除）
  * 
  * @param {VNode} vnode - 要卸载的虚拟节点
  * @returns {void}
  */
 function unmount(vnode) {
+  // 内部组件 Transition 的渲染器支持
+  // 判断 VNode 是否需要过渡处理
+  const needTransition = vnode.transition
+
   // 在卸载时，如果卸载的vnode类型为Fragment，则需要卸载其children
   if (vnode.type === Fragment) {
     vnode.children.forEach((c) => unmount(c))
@@ -146,7 +150,17 @@ function unmount(vnode) {
   const parent = vnode.el.parentNode
   // 调用removeChild移除元素
   if (parent) {
-    parent.removeChild(vnode.el)
+    // 将卸载动作封装到 performRemove 函数中
+    const performRemove = () => parent.removeChild(vnode.el)
+    // 内部组件 Transition 的渲染器支持
+    if(needTransition) {
+      // 如果需要过渡处理，则调用 transition.leave 钩子，
+      // 同时将 DOM 元素和 performRemove 函数作为参数传递
+      vnode.transition.leave(vnode.el, performRemove)
+    } else {
+      // 如果不需要过渡处理，则直接执行卸载操作
+      performRemove()
+    }
   }
 }
 
@@ -157,7 +171,7 @@ function unmount(vnode) {
  * 1. 创建真实 DOM（el）
  * 2. 处理 children（文本 or 数组）
  * 3. 处理 props
- * 4. 插入到容器（支持使用锚点）
+ * 4. 插入到容器（支持使用锚点，插入前后可以应用动画）
  *
  * @param {VNode} vnode - 要挂载的 vnode（type 为字符串）
  * @param {HTMLElement} container - 父容器
@@ -191,8 +205,22 @@ function mountElement(vnode, container, anchor) {
     }
   }
 
+  // 内部组件 Transition 的渲染器支持
+  // 判断一个 VNode 是否需要过渡
+  const needTransition = vnode.transition
+  if (needTransition) {
+    // 调用 transition.beforeEnter 钩子，并将 DOM 元素作为参数传递
+    vnode.transition.beforeEnter(el)
+  }
+
   // 将元素添加到容器中
   insert(el, container, anchor)
+
+  // 内部组件 Transition 的渲染器支持
+  if (needTransition) {
+    // 调用 transition.enter 钩子，并将 DOM 元素作为参数传递
+    vnode.transition.enter(el)
+  }
 }
 
 /**

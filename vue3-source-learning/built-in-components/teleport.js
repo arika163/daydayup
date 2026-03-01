@@ -1,5 +1,9 @@
 const Teleport = {
   __isTeleport: true,
+  // 在实现 Teleport时，我们将 Teleport 组件的渲染逻辑
+  // 从渲染器中分离出来，这么做有两点好处：
+  //   - 可以避免渲染器逻辑代码“膨胀”
+  //   - 可以利用 Tree-Shaking 机制在最终的bundle中删除 Teleport 相关代码（如果未使用）
   process(n1, n2, container, anchor, internals) {
     // 通过 internals 参数取得渲染器的内部方法
     const { patch, patchChildren, move } = internals
