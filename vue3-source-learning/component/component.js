@@ -1,3 +1,98 @@
+/**
+ * 挂载组件（mountComponent）
+ * 
+ * 负责将组件 VNode 挂载为真实 DOM，并建立组件实例（instance），
+ * 同时通过响应式 effect 实现组件的自动更新。
+ * 
+ * ----------------------------------------
+ * 核心职责
+ * ----------------------------------------
+ * 1. 初始化 state / props
+ * 2. 创建组件实例（instance）
+ * 3. 执行 setup 函数
+ * 4. 建立响应式effect（执行render，然后挂载或更新）
+ * 5. 在合适位置执行生命周期钩子（beforeCreate / created / ...）
+ * 
+ * ----------------------------------------
+ * 组件的两种类型
+ * ----------------------------------------
+ * 1. 普通组件 ---> vnode.type 存放组件选项
+ * 2. 函数式组件 ---> vnode.type 存放render
+ *                   vnode.type.props 存放props选项
+ * 
+ * 两种类型的组件均需要得到支持
+ * 
+ * ----------------------------------------
+ * setup 机制
+ * ----------------------------------------
+ * 
+ * setup(props, setupContext)
+ * 
+ * 返回值：
+ * 
+ * ✔ function → 作为 render
+ * ✔ object   → 作为 setupState
+ * 
+ * ----------------------------------------
+ * renderContext
+ * ----------------------------------------
+ * render的执行上下文
+ * 
+ * 用 Proxy 实现访问优先级：
+ * 
+ * 访问顺序：
+ *   state → props → setupState
+ * 
+ * 特殊属性：
+ *   $slots → instance.slots
+ * 
+ * 作用：
+ *   - 支持 this.xxx 访问
+ * 
+ * ----------------------------------------
+ * 响应式更新机制（核心）
+ * ----------------------------------------
+ * 
+ * effect(() => {
+ *   const subTree = render()
+ * 
+ *   if (!isMounted) {
+ *     // 渲染器挂载子树
+ *   } else {
+ *     // 渲染器更新子树
+ *   }
+ * 
+ *   instance.subTree = subTree
+ * })
+ * 
+ * 副作用执行调度器: queueJob
+ *   → 加入异步队列，批量更新
+ * 
+ * ----------------------------------------
+ * vnode 树结构关键点
+ * ----------------------------------------
+ * 
+ * vnode.children：
+ *   → 组件“外部传入内容”（插槽）
+ * 
+ * vnode.component.subTree：
+ *   → 组件 render 生成的真实子树（核心链路）
+ * 
+ * **整棵 UI 树是通过 subTree 串起来的**
+ * 
+ * ----------------------------------------
+ * 总结
+ * ----------------------------------------
+ * 
+ * mountComponent = 初始化组件 + 建立响应式更新系统
+ * 
+ * 主动更新：
+ *   state变化 → effect重新执行 → render → patch
+ * 
+ * 被动更新：
+ *   父组件更新 → 子组件props变化 -> effect重新执行 → render → patch
+ * 
+ */
 function mountComponent(vnode, container, anchor) {
   // 检查是否是函数式组件
   const isFunctional = typeof vnode.type === 'function'
@@ -12,7 +107,7 @@ function mountComponent(vnode, container, anchor) {
     }
   }
 
-  // 获取组件的渲染函数 render
+  // 获取组件选项配置
   const { 
     render, 
     data,
@@ -35,10 +130,12 @@ function mountComponent(vnode, container, anchor) {
   const [props, attrs] = resolveProps(propsOption, vnode.props)
 
   // 定义组件实例，一个组件实例本质上就是一个对象，它包含与组件有关的状态信息
+  // 后面会被挂在组件vnode上，即 vnode.component
   const instance = {
     // 组件自身的状态数据，即data
     state,
     // 将解析出的props数据包装为shallowReactive并定义到组件实例上
+    // 这里这个浅响应是组件被动更新的基础，需要特别留意一下
     props: shallowReactive(props),
     // 一个布尔值，用来表示组件是否已经被挂载，初始值为 false
     isMounted: false,
@@ -202,7 +299,39 @@ function mountComponent(vnode, container, anchor) {
   })
 }
 
-// 子组件被动更新
+/**
+ * 更新组件（patchComponent）
+ * 
+ * 用于子组件被动更新
+ * 
+ * ----------------------------------------
+ * 核心逻辑
+ * ----------------------------------------
+ * 
+ * 1. 复用组件实例（instance）
+ * 2. 对比新旧 props（hasPropsChanged）
+ *        ↓
+ *    更新 props
+ *        ↓
+ *    间接触发组件重新渲染
+ * 
+ * ----------------------------------------
+ * 更新链路（完整流程）
+ * ----------------------------------------
+ * 
+ * 父组件 render
+ *   ↓
+ * 生成新 vnode（子组件）
+ *   ↓
+ * patchComponent
+ *   ↓
+ * 更新 props（触发响应式）
+ *   ↓
+ * 子组件 effect 重新执行
+ *   ↓
+ * render → patch
+ * 
+ */
 function patchComponent(n1, n2, anchor) {
   // 获取组件实例，即 n1.component，同时让新的组件虚拟节点 n2.component 也指向组件实例
   const instance = (n2.component = n1.component)
@@ -267,7 +396,7 @@ function setCurrentInstance(instance) {
   currentInstance = instance
 }
 
-// hooks
+// hooks实现
 function onMounted() {
   if (currentInstance) {
     // 将生命周期函数添加到 instance.mounted 数组中
