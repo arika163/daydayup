@@ -30,7 +30,7 @@
  *    - 收集依赖当前 key 的 effect（即activeEffect）
  *
  * 2. 在 trigger 阶段：
- *    - 根据 target + key 找到对应 effect 并执行
+ *    - 根据 target + key 找到对应 Set<effectFn> 并执行
  *
  * ----------------------------------------
  * 为什么是 WeakMap？
@@ -52,6 +52,7 @@ const bucket = new WeakMap()
  * - 实现依赖收集（track）与触发更新（trigger）
  * - 支持深/浅响应 & 只读模式
  * - 自动对嵌套对象进行递归代理（惰性）
+ * - 对异质对象：数组、Set、Map 的良好支持（Set、Map相关内容省略）
  *
  * ----------------------------------------
  * 依赖收集时机（track）
@@ -63,7 +64,7 @@ const bucket = new WeakMap()
  * 触发更新时机（trigger）
  * ----------------------------------------
  * - set（新增 / 修改）
- * - delete
+ * - deleteProperty
  * - ownKeys（影响 for...in / Object.keys）
  *
  * ----------------------------------------
@@ -103,21 +104,20 @@ function createReactive(obj, isShallow = false, isReadonly = false) {
       }
 
       // 如果操作的目标对象是数组，并且key存在于arrayInstrumentations上，
-      // 那么返回定义在arrayInstrumentation上的值
-      // 详见独立文件
+      // 那么返回定义在arrayInstrumentation上的值，详见独立文件
       if(Array.isArray(target) && arrayInstrumentations.hasOwnProperty(key)) {
         return Reflect.get(arrayInstrumentations, key, receiver)
       }
 
       // 非只读的时候才需要建立响应联系
-      // 添加判断，如果key的类型是symbol，则不进行追踪
+      // 添加判断，如果key的类型是symbol，则不进行追踪（性能优化）
       if(!isReadonly && typeof key !== 'symbol') {
         // 将副作用函数 activeEffect 添加到存储副作用函数的桶中
         track(target, key)
       }
 
       // 得到原始值结果
-      const res = Reflect.get(target, key, receiver) // 使用 reflect 的原因参考 5.1 节
+      const res = Reflect.get(target, key, receiver) // 使用 reflect 的原因参考 5.1 节，照顾访问器属性读取其他属性的场景
 
       // 如果是浅响应，则直接返回原始值
       if(isShallow) {
@@ -140,10 +140,10 @@ function createReactive(obj, isShallow = false, isReadonly = false) {
         return true
       }
 
-      const oldVal = target[key]
+      const oldVal = target[key] // 旧值用于判断是否需要触发更新（值真的变了才触发）
 
-      // 确定是新增属性还是修改属性
-      // 因为新增属性的场合，应该把 ITERATE_KEY 相关的副作用函数也拿出来执行（见 proxy -> ownkeys）
+      // 确定操作类型：新增属性 or 修改属性
+      // 后面 trigger 需要该参数来确定执行的副作用函数的范围
       const type = Array.isArray(target)
         // 如果代理目标是数组，则检测被设置的索引值是否小于数组长度，
         // 如果是，则视作SET操作，否则是ADD操作
@@ -164,6 +164,7 @@ function createReactive(obj, isShallow = false, isReadonly = false) {
 
       return res
     },
+    // 支持 in 操作符
     has(target, key) {
       track(target, key)
       return Reflect.has(target, key)
@@ -182,12 +183,13 @@ function createReactive(obj, isShallow = false, isReadonly = false) {
 
       if (res && hadKey) {
         // 只有当被删除的属性时对象自己的属性并且成功删除时，才触发更新
-        // 传入类型为 'DELETE'，意味着需要执行 ITERATE_KEY 相关的 effect
+        // 传入操作类型为 'DELETE'
         trigger(target, key, 'DELETE')
       }
 
       return res
     },
+    // 支持 for...in 循环
     ownKeys(target) {
       // 如果操作目标target是数组，则使用length属性作为key并建立响应联系
       track(target, Array.isArray(target) ? 'length' : ITERATE_KEY)
@@ -195,8 +197,6 @@ function createReactive(obj, isShallow = false, isReadonly = false) {
     }
   })
 }
-
-
 
 /**
  * 收集依赖
@@ -235,7 +235,9 @@ function createReactive(obj, isShallow = false, isReadonly = false) {
  *
  */
 function track(target, key) {
-  // 没有 activeEffect 直接return
+  // - 没有 activeEffect 直接return
+  // - shouldTrack 用于控制是否允许依赖收集
+  //   用于避免数组方法内部隐式读取 length 属性导致的不正确的依赖收集
   if (!activeEffect || !shouldTrack) return
 
   // 获取 target 对应的 depsMap（Map）
@@ -264,7 +266,7 @@ function track(target, key) {
 }
 
 /**
- * 触发依赖更新（Dependency Triggering）
+ * 触发依赖更新
  *
  * 核心作用：
  * - 在数据发生变化时，找到相关副作用函数并执行
@@ -282,8 +284,7 @@ function track(target, key) {
  * 2. 根据 key 找到直接相关的 effects
  * 3. 构建 effectsToRun（避免重复 & 避免死循环）
  * 4. 根据不同操作类型，补充额外依赖：
- *    - ITERATE_KEY（for...in / Map 遍历）
- *    - MAP_KEY_ITERATE_KEY（Map key 遍历）
+ *    - ITERATE_KEY（for...in）
  *    - length（数组新增）
  *    - index >= new length（数组截断）
  * 5. 执行副作用函数（支持 scheduler）
@@ -293,7 +294,7 @@ function track(target, key) {
  * ----------------------------------------
  *
  * - 使用 Set 去重
- * - 避免在遍历过程中修改原始依赖集合
+ * - 避免在遍历过程中修改原始依赖集合导致无限循环
  *
  * ----------------------------------------
  * 特殊处理逻辑
@@ -305,13 +306,7 @@ function track(target, key) {
  * ▶ 2. ADD / DELETE
  * - 触发 ITERATE_KEY（影响遍历）
  *
- * ▶ 3. Map 类型
- * - SET：触发 ITERATE_KEY
- * - ADD / DELETE：触发
- *   - ITERATE_KEY
- *   - MAP_KEY_ITERATE_KEY
- *
- * ▶ 4. 数组处理
+ * ▶ 3. 数组处理
  *
  * （1）新增元素（ADD）
  * - 触发 length 依赖
@@ -344,19 +339,22 @@ function track(target, key) {
  *
  */
 function trigger(target, key, type, newVal) {
+  // 根据 target + key 获取 Set<effectFn>
   const depsMap = bucket.get(target)
   if (!depsMap) return
   const effects = depsMap.get(key)
 
   // 新建一个set，避免直接用原set遍历
-  // 引起无限循环
+  // 引起无限循环（effect执行时会从set中删除自己再重新加入）
   const effectsToRun = new Set() 
 
-  // 如果一个副作用函数读取了一个响应式变量，且
-  // 又修改了这个变量的值，这个副作用函数就会引起无限循环
-  // 解决办法为：禁止当前正在执行的副作用函数触发自身
+  // 将 Set<effectFn> 中的副作用函数 添加到新 Set 中
   effects &&
     effects.forEach((effectFn) => {
+      // 如果一个副作用函数读取了一个响应式变量，且
+      // 又修改了这个变量的值，这个副作用函数就会引起无限循环
+      // 解决办法为：禁止当前正在执行的副作用函数触发自身
+
       // 如果 trigger 触发执行的副作用函数与当前正在执行的副作用函数相同，则不触发执行
       if (effectFn !== activeEffect) {
         effectsToRun.add(effectFn)
@@ -364,35 +362,11 @@ function trigger(target, key, type, newVal) {
     })
 
   // 当操作类型为 'ADD' 或 'DELETE' 时，应触发与 ITERATE_KEY 相关联的副作用函数重新执行
-  // 因为该操作会影响 for...in 循环的执行结果（见proxy->ownkeys）
-  if(
-    type === 'ADD' ||
-    type === 'DELETE' ||
-    // 如果操作类型是SET，并且目标对象是Map类型的数据，
-    // 也应该触发那些与ITERATE_KEY相关联的副作用函数重新执行
-    (
-      type === 'SET' &&
-      Object.prototype.toString.call(target) === '[object Map]'
-    )
-  ) {
+  // 因为该操作会影响 for...in 循环的执行结果（见 proxy -> ownKeys ）
+  if(type === 'ADD' || type === 'DELETE') {
     const iterateEffects = depsMap.get(ITERATE_KEY)
     iterateEffects && iterateEffects.forEach(effectFn => {
       if (effectFn !== activeEffect) {
-        effectsToRun.add(effectFn)
-      }
-    })
-  }
-  
-  if (
-    // 操作类型为ADD或DELETE
-    (type === 'ADD' || type === 'DELETE') &&
-    // 并且是Map类型的数据
-    Object.prototype.toString.call(target) === '[object Map]'
-  ) {
-    // 则取出那些与 MAP_KEY_ITERATE_KEY 相关的副作用函数并执行
-    const iterateEffects = depsMap.get(MAP_KEY_ITERATE_KEY)
-    iterateEffects && iterateEffects.forEach(effectFn => {
-      if(effectFn !== activeEffect) {
         effectsToRun.add(effectFn)
       }
     })
